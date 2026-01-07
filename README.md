@@ -1,0 +1,1 @@
+This is a collection of network service enumeration tools, all syntax for each tool is included in the tool comments sections. Some may perform light exploitation to validate a finding. The idea here is to build a collection of tools that will corrolate with an NMAP scan to encompass an all inclusive tool for scanning and enumeration. 
