@@ -14,6 +14,6 @@ ie smb_security_audit.sh -L smb.txt
 
 will run the smb enumeration across the smb servers using the latest tools (at the time of writing) 
 
-Some may scripts perform light exploitation to validate a finding, although most are just manual enumeration strings wrapped into bash or python scripts. 
+Some scripts perform light exploitation to validate a finding, although most are just manual enumeration strings wrapped into bash or python scripts. 
 
 The idea here is to build a collection of tools that will corrolate with an NMAP scan to encompass an all inclusive toolset for scanning and enumeration network services - whilst keeping the human in control. 
