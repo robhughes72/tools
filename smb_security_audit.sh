@@ -65,8 +65,6 @@ for IP in "${TARGETS[@]}"; do
 
     # --- 2. UNUATHENTICATED / NULL SESSION (CHECKLIST SPECIFIC) ---
     echo -e "${YEL}[*] PHASE 2: ANONYMOUS / NULL-SESSION CHECKS${NC}"
-    echo "[+] RPC Endpoint Dump (rpcdump.py):"
-    /usr/share/doc/python3-impacket/examples/rpcdump.py "$IP" | head -n 15
     
     echo -e "\n[+] Anonymous SAM Dump (samrdump.py):"
     /usr/share/doc/python3-impacket/examples/samrdump.py "$IP" 2>/dev/null | head -n 15
@@ -75,24 +73,19 @@ for IP in "${TARGETS[@]}"; do
     # --- 3. PRIMARY ENUMERATION (ENUM4LINUX-NG) ---
     echo -e "${YEL}[*] PHASE 3: PRIMARY DISCOVERY (enum4linux-ng)${NC}"
     NG_LOG="$OUTPUT_DIR/${IP}_ng.txt"
-    enum4linux-ng -A -u "${USER:-}" -p "${PASS:-}" -w "${DOMAIN:-.}" "$IP" > "$NG_LOG" 2>&1
+    enum4linux-ng -A -R -u "${USER:-}" -p "${PASS:-}" -w "${DOMAIN:-.}" "$IP" > "$NG_LOG" 2>&1
     cat "$NG_LOG"
 
-    # --- 4. LEGACY FALLBACK & SID BRUTE (IF NG FAILS) ---
-    if ! grep -qi "user:\[" "$NG_LOG" && ! grep -qi "rid:" "$NG_LOG"; then
-        echo -e "\n${RED}[!] enum4linux-ng failed to list users. Falling back to LEGACY...${NC}"
-        echo -e "${YEL}[*] PHASE 4: LEGACY FALLBACK & SID LOOKUP${NC}"
-        enum4linux -w "${DOMAIN:-.}" -u "${USER:-}" -p "${PASS:-}" -U "$IP"
-        
+
         # Check for SID listing if credentials are provided
         if [ -n "$USER" ]; then
             echo -e "\n[+] Authenticated SID Lookup (lookupsid.py):"
             /usr/share/doc/python3-impacket/examples/lookupsid.py "${DOMAIN:-.}/${USER}:${PASS}@${IP}" 2>/dev/null | head -n 15
         fi
-    fi
+
     echo "--------------------------------------------------"
 
-    # --- 5. SHARE & IPC$ VERIFICATION ---
+    # --- 4. SHARE & IPC$ VERIFICATION ---
     echo -e "${YEL}[*] PHASE 5: SHARE ACCESS & IPC$ VERIFICATION${NC}"
     # Explicitly check IPC$ read-only access for the report [Source 15]
     echo -ne "    IPC$ Access: "
@@ -102,9 +95,9 @@ for IP in "${TARGETS[@]}"; do
     smbmap -H "$IP" -d "${DOMAIN:-.}" -u "${USER:-guest}" -p "${PASS:-}" --depth 2
     echo "--------------------------------------------------"
 
-    # --- 6. DETECTION-ONLY VULNERABILITY CHECKS ---
+    # --- 5. DETECTION-ONLY VULNERABILITY CHECKS ---
     echo -e "${YEL}[*] PHASE 6: VULNERABILITY DETECTION${NC}"
-    nmap -p 445 --script smb-vuln-ms17-010,smb-vuln-conficker -Pn "$IP"
+    nmap -p 445 --script smb-vuln* -Pn "$IP"
     echo -e "\n${YEL}==================================================${NC}"
 done
 
