@@ -1,41 +1,27 @@
 #!/bin/bash
 
 # RDP Security Audit Script - 2026 Kali Edition
-# Usage: ./rdp_audit.sh -t <target> [-l <file>] [-u <user>] [-p <pass>] [-d <domain>] [-o <output_file>]
+# Independent Flagging of TLS 1.0/1.1, RC4, CBC, and 3DES
 
 show_help() {
-    echo "Usage: $0 [options]"
-    echo "  -t <target>      Single IP or CIDR range"
-    echo "  -l <file>        Path to a file containing a list of IPs"
-    echo "  -u <user>        Username for authenticated checks (optional)"
-    echo "  -p <pass>        Password for authenticated checks (optional)"
-    echo "  -d <domain>      Domain for authenticated checks (optional)"
-    echo "  -o <output_file> Path to save results (default: rdp_audit_results.txt)"
+    echo "Usage: $0 -t <target> [-l <file>] [-o <output_file>]"
     exit 1
 }
 
 OUTPUT_FILE="rdp_audit_results.txt"
-
-while getopts "t:l:u:p:d:o:h" opt; do
+while getopts "t:l:o:h" opt; do
     case "$opt" in
         t) TARGETS=$OPTARG ;;
         l) TARGET_FILE=$OPTARG ;;
-        u) USER=$OPTARG ;;
-        p) PASS=$OPTARG ;;
-        d) DOMAIN=$OPTARG ;;
         o) OUTPUT_FILE=$OPTARG ;;
         h) show_help ;;
         *) show_help ;;
     esac
 done
 
-if [[ -z "$TARGETS" && -z "$TARGET_FILE" ]]; then show_help; fi
-
-if [[ -f "$TARGET_FILE" ]]; then
-    IP_LIST=$(cat "$TARGET_FILE")
-else
-    IP_LIST=$TARGETS
-fi
+[[ -z "$TARGETS" && -z "$TARGET_FILE" ]] && show_help
+IP_LIST=${TARGET_FILE:+$(cat "$TARGET_FILE")}
+IP_LIST=${IP_LIST:-$TARGETS}
 
 > "$OUTPUT_FILE"
 
@@ -43,80 +29,123 @@ run_audit() {
     for ip in $IP_LIST; do
         echo -e "\n\e[1;34m[*] Starting Audit for: $ip\e[0m"
 
-        # 1. Reachability & Port Check
+        # 1. Port Check
         if ! nmap -p 3389 --open -Pn "$ip" | grep -q "3389/tcp open"; then
-            echo "[-] RDP Port Closed or Filtered. Skipping $ip."
+            echo "[-] RDP Port Closed. Skipping $ip."
             continue
         fi
 
-        # 2. Nmap Enumeration
-        echo "[+] Enumerating NLA and Ciphers via Nmap..."
-        SCAN_DATA=$(nmap -p 3389 --script rdp-enum-encryption,rdp-ntlm-info "$ip")
+        # 2. Nmap RDP Info (NLA Check Source of Truth)
+        echo "[+] Running Nmap RDP Enumeration..."
+        SCAN_DATA=$(nmap -p 3389 --script rdp-ntlm-info,rdp-enum-encryption,rdp-vuln-ms12-020 "$ip" -Pn)
         echo "$SCAN_DATA" | sed 's/^/    /'
 
-        # 3. Active NLA Validation (The xfreerdp3 Check)
-        # Only run this if Nmap indicates RDSTLS is a success (which often causes the false positive)
+        # 3. NLA Enforcement Logic (Suppressed if CredSSP SUCCESS found)
         NLA_ENFORCED=false
-        if echo "$SCAN_DATA" | grep -q "RDSTLS: SUCCESS"; then
-            echo "[+] RDSTLS detected. Validating if NLA is strictly enforced..."
-            # Run xfreerdp3 with /sec:tls to see if server rejects it
-            timeout 5s xfreerdp3 /v:"$ip":3389 /cert:ignore /sec:tls /auth-only > /tmp/rdp_nla_check.log 2>&1
-            
-            # Check for the specific NLA-enforced failure message
-            if grep -q "HYBRID_REQUIRED_BY_SERVER" /tmp/rdp_nla_check.log; then
-                echo "    [CONFIRMED] Server rejected TLS-only connection: NLA is ENFORCED."
-                NLA_ENFORCED=true
-            elif grep -q "Authentication only, exit status 0" /tmp/rdp_nla_check.log; then
-                echo -e "    \e[1;31m[!] WARNING: NLA NOT enforced.\e[0m Server accepted TLS-only connection."
-                NLA_ENFORCED=false
-            fi
+        if echo "$SCAN_DATA" | grep -q "CredSSP (NLA): SUCCESS"; then
+            NLA_ENFORCED=true
+            echo "    [CHECK] CredSSP (NLA) confirmed: NLA is Enforced."
         fi
 
-        # 4. testssl.sh Cipher and Protocol Audit
-        echo "[+] Running testssl.sh for detailed Protocol/Cipher issues..."
-        testssl --quiet -p -E -U "$ip:3389" 2>/dev/null | grep -E "not ok|vulnerable|weak|offered" | sed 's/^/    /'
+        # 4. Independent Protocol & Cipher Scans (RED Flagging)
+        echo "[+] Checking for Legacy Protocols and Weak Ciphers..."
+        TMP_TLS="/tmp/nmap_tls_$ip.txt"
+        nmap --script ssl-enum-ciphers -p 3389 "$ip" -Pn > "$TMP_TLS"
 
-        # 5. Vulnerability Scanning
-        echo "[+] Scanning for RDP Vulnerabilities..."
-        VULN_DATA=$(nmap -p 3389 --script "rdp-vuln*" "$ip")
-        echo "$VULN_DATA" | sed 's/^/    /'
+        # Independent Discovery Flags
+        FOUND_TLS=false
+        FOUND_RC4=false
+        FOUND_CBC=false
+        FOUND_3DES=false
 
-        # 6. Authenticated Session (Optional)
-        if [[ -n "$USER" && -n "$PASS" ]]; then
-            echo "[+] Testing Authenticated Redirection Policies..."
-            xfreerdp3 /v:"$ip" /u:"$USER" /p:"$PASS" ${DOMAIN:+/d:"$DOMAIN"} /cert:ignore /auth-only > /tmp/rdp_auth.log 2>&1
-            if grep -q "Authentication only, exit status 0" /tmp/rdp_auth.log; then
-                echo "    [SUCCESS] Credentials valid."
-            else
-                echo "    [FAILED] Authentication failed for $USER."
-            fi
+        # Detect TLS 1.0/1.1
+        if grep -E "TLSv1\.0|TLSv1\.1" "$TMP_TLS" > /dev/null; then
+            echo -e "    \e[1;31m[!] LEGACY PROTOCOLS DETECTED (TLS 1.0/1.1):\e[0m"
+            grep -E "TLSv1\.0|TLSv1\.1" "$TMP_TLS" | sed 's/^/      /' | grep --color=always -E "TLSv1\.0|TLSv1\.1"
+            FOUND_TLS=true
         fi
 
-        # 7. Summary Logic
+        # Detect RC4
+        if grep -i "RC4" "$TMP_TLS" > /dev/null; then
+            echo -e "    \e[1;31m[!] WEAK CIPHERS DETECTED (RC4):\e[0m"
+            grep -i "RC4" "$TMP_TLS" | sed 's/^/      /' | grep --color=always -i "RC4"
+            FOUND_RC4=true
+        fi
+
+        # Detect CBC
+        if grep "CBC" "$TMP_TLS" > /dev/null; then
+            echo -e "    \e[1;31m[!] WEAK CIPHERS DETECTED (CBC):\e[0m"
+            grep "CBC" "$TMP_TLS" | sed 's/^/      /' | grep --color=always "CBC"
+            FOUND_CBC=true
+        fi
+
+        # Detect 3DES
+        if grep "3DES" "$TMP_TLS" > /dev/null; then
+            echo -e "    \e[1;31m[!] WEAK CIPHERS DETECTED (3DES):\e[0m"
+            grep "3DES" "$TMP_TLS" | sed 's/^/      /' | grep --color=always "3DES"
+            FOUND_3DES=true
+        fi
+
+        # 5. testssl.sh Audit (Bypassing OpenSSL 3.x restrictions)
+        echo "[+] Running testssl.sh Audit..."
+        TESTSSL_OUT=$(testssl --quiet --openssl-timeout 5 --cipher 'ALL:COMPLEMENTOFALL:eNULL@SECLEVEL=0' -p -4 -W -e "$ip:3389" 2>/dev/null)
+        
+        echo "$TESTSSL_OUT" | grep -E "not ok|vulnerable|weak|offered|TLS1|RC4|DES|CBC" | while read -r line; do
+            echo -e "    \e[1;31m$line\e[0m"
+            [[ "$line" =~ "TLS1" ]] && FOUND_TLS=true
+            [[ "$line" =~ "RC4" ]] && FOUND_RC4=true
+            [[ "$line" =~ "CBC" ]] && FOUND_CBC=true
+            [[ "$line" =~ "DES" || "$line" =~ "3DES" ]] && FOUND_3DES=true
+        done
+
+        # 6. SUMMARY LOGIC (STRICTLY INDEPENDENT)
         echo -e "\e[1;33m[!] Audit Summary for $ip:\e[0m"
         HAS_ISSUES=false
 
-        # Only recommend NLA if it's not enforced AND Nmap didn't see CredSSP as the only option
-        if ! $NLA_ENFORCED; then
-            if ! echo "$SCAN_DATA" | grep -q "CredSSP (NLA): SUCCESS" || echo "$SCAN_DATA" | grep -q "Native RDP: SUCCESS"; then
-                echo "    - RECOMMENDATION: Enforce NLA (Network Level Authentication)."
-                HAS_ISSUES=true
-            fi
-        fi
-
-        if echo "$SCAN_DATA" | grep -E "TLSv1.0|TLSv1.1" > /dev/null; then
-            echo "    - RECOMMENDATION: Disable legacy TLS 1.0/1.1; enforce TLS 1.2+."
+        # NLA Suppression Logic
+        if [ "$NLA_ENFORCED" = "false" ]; then
+            echo -e "    \e[1;31m- RECOMMENDATION: Enforce NLA (Network Level Authentication).\e[0m"
             HAS_ISSUES=true
         fi
 
-        if echo "$VULN_DATA" | grep -qi "VULNERABLE"; then
-            echo "    - RECOMMENDATION: CRITICAL - Apply patches for identified CVEs."
+        # Protocol Recommendation
+        if [ "$FOUND_TLS" = "true" ]; then
+            echo -e "    \e[1;31m- RECOMMENDATION: Disable Legacy Protocols (TLS 1.0 and TLS 1.1).\e[0m"
             HAS_ISSUES=true
         fi
 
-        if ! $HAS_ISSUES; then
+        # RC4 Recommendation
+        if [ "$FOUND_RC4" = "true" ]; then
+            echo -e "    \e[1;31m- RECOMMENDATION: Disable RC4 Ciphers.\e[0m"
+            HAS_ISSUES=true
+        fi
+
+        # Logic for CBC and 3DES recommendation text
+        CIPHER_REC=""
+        if [ "$FOUND_CBC" = "true" ] && [ "$FOUND_3DES" = "true" ]; then
+            CIPHER_REC="Disable Weak Ciphers (CBC Mode and 3DES)."
+        elif [ "$FOUND_CBC" = "true" ]; then
+            CIPHER_REC="Disable Weak Ciphers (CBC Mode)."
+        elif [ "$FOUND_3DES" = "true" ]; then
+            CIPHER_REC="Disable Weak Ciphers (3DES)."
+        fi
+
+        if [[ -n "$CIPHER_REC" ]]; then
+            echo -e "    \e[1;31m- RECOMMENDATION: $CIPHER_REC\e[0m"
+            HAS_ISSUES=true
+        fi
+
+        # Vulnerability Recommendation
+        if echo "$SCAN_DATA" | grep -qi "VULNERABLE"; then
+            echo -e "    \e[1;31m- RECOMMENDATION: CRITICAL - Patch identified RDP vulnerabilities.\e[0m"
+            HAS_ISSUES=true
+        fi
+
+        if [ "$HAS_ISSUES" = "false" ]; then
             echo "    - Server configuration meets baseline security requirements."
         fi
+        
+        rm -f "$TMP_TLS"
     done
 }
 
