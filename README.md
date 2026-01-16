@@ -1,6 +1,6 @@
 This is a collection of network service enumeration tools I have built to assist with the scanning an enumeration phase of a Penetration test, most syntax for each tool is included in the tool comments sections, which will be displayed when running the tool with no arguments. 
 
-Start with the host discovery and port scanning script, recon.sh, which is just a wrapper around namp.
+Start with the host discovery and port scanning script, recon.sh, which is just a wrapper around nmap.
 
 If you need to perform a host discovery, you enter the subnets and the tool will perform a ping sweep across the subnet. 
 
